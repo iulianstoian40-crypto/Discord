@@ -733,10 +733,19 @@ async def giveaway_cmd(interaction: discord.Interaction):
 # ON READY
 # ──────────────────────────────────────────────
 
+OWNER_ID = 401451926681812993
+
 @bot.event
 async def on_ready():
     global youtube_channel_id_resolved
     print(f"✅ Bot pornit ca {bot.user}")
+
+    # DM către owner la fiecare pornire
+    try:
+        owner = await bot.fetch_user(OWNER_ID)
+        await owner.send(f"✅ Botul a pornit/restartat cu succes la `{datetime.utcnow().strftime('%d.%m.%Y %H:%M')} UTC`")
+    except Exception:
+        pass
 
     bot.add_view(VerificareView())
     bot.add_view(DropdownView())
