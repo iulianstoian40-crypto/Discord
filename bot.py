@@ -498,8 +498,8 @@ class JocDropdown(discord.ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=j, value=j) for j in JOCURI_GAMER]
         super().__init__(
-            placeholder="Alege jocul tău principal...",
-            min_values=1, max_values=1,
+            placeholder="Alege jocul/jocurile tale...",
+            min_values=1, max_values=len(JOCURI_GAMER),
             options=options,
             custom_id="joc_select"
         )
@@ -507,18 +507,19 @@ class JocDropdown(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         guild  = interaction.guild
         member = interaction.user
-        joc_ales = self.values[0]
+        jocuri_alese = self.values
 
         rol_gamer = discord.utils.get(guild.roles, name=ROL_GAMER)
-        rol_joc   = discord.utils.get(guild.roles, name=joc_ales)
 
         if not rol_gamer:
             await interaction.response.send_message("⚠️ Rolul Gamer nu a fost găsit. Contactează un admin.", ephemeral=True)
             return
 
         roluri_de_dat = [rol_gamer]
-        if rol_joc:
-            roluri_de_dat.append(rol_joc)
+        for joc in jocuri_alese:
+            rol_joc = discord.utils.get(guild.roles, name=joc)
+            if rol_joc:
+                roluri_de_dat.append(rol_joc)
 
         try:
             await member.add_roles(*roluri_de_dat, reason="Verificare Gamer completată")
@@ -530,8 +531,10 @@ class JocDropdown(discord.ui.Select):
             return
 
         await verifica_si_da_verified(member, guild)
+
+        jocuri_text = ", ".join(jocuri_alese)
         await interaction.response.send_message(
-            f"✅ Ai primit rolul **{ROL_GAMER}** + **{joc_ales}**!",
+            f"✅ Ai primit rolul **{ROL_GAMER}** + **{jocuri_text}**!",
             ephemeral=True
         )
 
@@ -539,8 +542,8 @@ class JocDropdown(discord.ui.Select):
             title="🎮 Bun venit în comunitate!",
             description=(
                 f"Salut, **{member.display_name}**!\n\n"
-                f"🎮 **Joc:** {joc_ales}\n"
-                f"🏷️ **Roluri primite:** {ROL_GAMER} + {joc_ales}\n\n"
+                f"🎮 **Jocuri:** {jocuri_text}\n"
+                f"🏷️ **Roluri primite:** {ROL_GAMER} + {jocuri_text}\n\n"
                 f"Acum ai acces la canalele de gaming!\n\n"
                 f"Mulțumim că te-ai alăturat comunității! Pentru orice problemă contactează un Admin sau Moderator."
             ),
