@@ -229,6 +229,12 @@ def are_rol_staff(member: discord.Member) -> bool:
 
 async def verifica_si_da_verified(member: discord.Member, guild: discord.Guild):
     """Dacă userul are atât Metin2 cât și Gamer, îi dă Verified."""
+    await asyncio.sleep(1)
+    # Refetch member pentru a avea rolurile actualizate
+    try:
+        member = await guild.fetch_member(member.id)
+    except Exception:
+        pass
     role_names = [r.name for r in member.roles]
     if ROL_METIN2 in role_names and ROL_GAMER in role_names:
         rol_verified = discord.utils.get(guild.roles, name=ROL_VERIFIED)
