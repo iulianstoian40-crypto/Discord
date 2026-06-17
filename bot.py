@@ -1073,6 +1073,54 @@ async def ban(interaction: discord.Interaction, membru: discord.Member, motiv: s
         await interaction.response.send_message("❌ Nu am permisiuni suficiente.", ephemeral=True)
 
 
+class AnuntModal(discord.ui.Modal, title="Creează Anunț"):
+    titlu = discord.ui.TextInput(label="Titlu", placeholder="ex: Eveniment nou: Duelul Profeților", max_length=256)
+    text = discord.ui.TextInput(
+        label="Conținut",
+        placeholder="Scrie aici textul complet al anunțului...",
+        style=discord.TextStyle.paragraph,
+        max_length=4000
+    )
+    imagine = discord.ui.TextInput(
+        label="Link imagine (opțional)",
+        placeholder="https://...",
+        required=False,
+        max_length=300
+    )
+
+    def __init__(self, canal_id: int):
+        super().__init__()
+        self.canal_id = canal_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        canal = bot.get_channel(self.canal_id)
+        if not canal:
+            await interaction.response.send_message("❌ Canalul nu a fost găsit.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=self.titlu.value.strip(),
+            description=self.text.value.strip(),
+            color=0x5865F2
+        )
+        if self.imagine.value.strip():
+            embed.set_image(url=self.imagine.value.strip())
+        embed.set_footer(text=f"Anunț de {interaction.user.display_name} • Hydra Prestige")
+        embed.timestamp = datetime.utcnow()
+
+        await canal.send(embed=embed)
+        await interaction.response.send_message(f"✅ Anunț postat în <#{self.canal_id}>!", ephemeral=True)
+
+
+@tree.command(name="anunt", description="Postează un anunț formatat ca embed într-un canal ales")
+@app_commands.describe(canal="Canalul în care se postează anunțul")
+async def anunt_cmd(interaction: discord.Interaction, canal: discord.TextChannel):
+    if not are_rol_staff(interaction.user):
+        await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
+        return
+    await interaction.response.send_modal(AnuntModal(canal.id))
+
+
 @tree.command(name="giveaway", description="Creează un giveaway")
 async def giveaway_cmd(interaction: discord.Interaction):
     if not are_rol_staff(interaction.user):
