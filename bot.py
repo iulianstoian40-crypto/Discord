@@ -227,6 +227,27 @@ async def trimite_odata(canal, titlu, text, culoare=0xE8B84B, imagine=None):
 def are_rol_staff(member: discord.Member) -> bool:
     return any(r.name in ROLURI_STAFF for r in member.roles)
 
+def parse_durata(text: str) -> int | None:
+    """Parsează durată flexibilă: '3d', '2h', '30m', '1d12h30m' -> secunde totale."""
+    import re
+    text = text.strip().lower().replace(" ", "")
+    pattern = r'(\d+)([dhm])'
+    matches = re.findall(pattern, text)
+    if not matches:
+        return None
+
+    total_secunde = 0
+    for valoare, unitate in matches:
+        valoare = int(valoare)
+        if unitate == 'd':
+            total_secunde += valoare * 86400
+        elif unitate == 'h':
+            total_secunde += valoare * 3600
+        elif unitate == 'm':
+            total_secunde += valoare * 60
+
+    return total_secunde if total_secunde > 0 else None
+
 async def verifica_si_da_verified(member: discord.Member, guild: discord.Guild):
     """Dacă userul are atât Metin2 cât și Gamer, îi dă Verified."""
     await asyncio.sleep(1)
@@ -354,8 +375,8 @@ async def verifica_membrii_giveaway():
             guild = canal.guild
             if guild.member_count >= data["membri_minim"]:
                 data["pornit"] = True
-                data["end_time"] = datetime.utcnow() + timedelta(days=data["zile"])
-                asyncio.create_task(countdown_giveaway(msg_id, data["zile"] * 86400))
+                data["end_time"] = datetime.utcnow() + timedelta(seconds=data["secunde_durata"])
+                asyncio.create_task(countdown_giveaway(msg_id, data["secunde_durata"]))
                 print(f"✅ Giveaway {msg_id} pornit")
             try:
                 msg = await canal.fetch_message(msg_id)
@@ -740,7 +761,11 @@ class VerificareGamerView(discord.ui.View):
 
 class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
     premiu = discord.ui.TextInput(label="Premiu", placeholder="ex: 1.000.000 Yang", max_length=100)
-    durata = discord.ui.TextInput(label="Durată (în zile)", placeholder="ex: 7", max_length=3)
+    durata = discord.ui.TextInput(
+        label="Durată",
+        placeholder="ex: 3d, 2h, 30m, 1d12h",
+        max_length=20
+    )
     membri_minim = discord.ui.TextInput(
         label="Membri minim pentru start (opțional)",
         placeholder="ex: 50 — lasă gol dacă nu e necesar",
@@ -756,12 +781,14 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        try:
-            zile = int(self.durata.value.strip())
-            if zile < 1 or zile > 365:
-                raise ValueError
-        except ValueError:
-            await interaction.response.send_message("❌ Durata trebuie să fie un număr între 1 și 365.", ephemeral=True)
+        secunde_durata = parse_durata(self.durata.value)
+        if not secunde_durata:
+            await interaction.response.send_message(
+                "❌ Format durată invalid. Folosește ex: `3d`, `2h`, `30m`, `1d12h`.", ephemeral=True
+            )
+            return
+        if secunde_durata > 365 * 86400:
+            await interaction.response.send_message("❌ Durata maximă e 365 de zile.", ephemeral=True)
             return
 
         membri_min = None
@@ -781,7 +808,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
 
         guild = interaction.guild
         pornit = True
-        end_time = datetime.utcnow() + timedelta(days=zile)
+        end_time = datetime.utcnow() + timedelta(seconds=secunde_durata)
 
         if membri_min and guild.member_count < membri_min:
             pornit = False
@@ -792,7 +819,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
             "invitati_de": {},
             "premiu": self.premiu.value.strip(),
             "end_time": end_time,
-            "zile": zile,
+            "secunde_durata": secunde_durata,
             "conditii": self.conditii.value.strip(),
             "canal_id": CANAL_GIVEAWAY_ID,
             "membri_minim": membri_min,
@@ -812,7 +839,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
         await interaction.response.send_message("✅ Giveaway creat cu succes!", ephemeral=True, delete_after=5)
 
         if pornit:
-            asyncio.create_task(countdown_giveaway(msg.id, zile * 86400))
+            asyncio.create_task(countdown_giveaway(msg.id, secunde_durata))
         else:
             if not verifica_membrii_giveaway.is_running():
                 verifica_membrii_giveaway.start()
@@ -889,6 +916,11 @@ class ConfirmView(discord.ui.View):
 
 async def countdown_giveaway(msg_id: int, secunde: int):
     await asyncio.sleep(secunde)
+    await finalizeaza_giveaway(msg_id)
+
+
+async def finalizeaza_giveaway(msg_id: int):
+    """Extrage câștigătorul unui giveaway — apelabil din countdown sau manual."""
     if msg_id not in giveaway_data:
         return
     data = giveaway_data[msg_id]
@@ -1127,6 +1159,36 @@ async def giveaway_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
         return
     await interaction.response.send_modal(GiveawayModal())
+
+
+@tree.command(name="extrage-giveaway", description="Extrage câștigătorul unui giveaway înainte de termen")
+@app_commands.describe(message_id="ID-ul mesajului giveaway-ului")
+async def extrage_giveaway(interaction: discord.Interaction, message_id: str):
+    if not are_rol_staff(interaction.user):
+        await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
+        return
+    try:
+        msg_id = int(message_id.strip())
+    except ValueError:
+        await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
+        return
+
+    if msg_id not in giveaway_data:
+        await interaction.response.send_message("❌ Nu există niciun giveaway activ cu acest ID.", ephemeral=True)
+        return
+
+    data = giveaway_data[msg_id]
+    canal = bot.get_channel(data["canal_id"])
+
+    # Ștergem mesajul original al giveaway-ului
+    try:
+        msg = await canal.fetch_message(msg_id)
+        await msg.delete()
+    except Exception:
+        pass
+
+    await finalizeaza_giveaway(msg_id)
+    await interaction.response.send_message("✅ Giveaway extras cu succes, înainte de termen!", ephemeral=True)
 
 
 @tree.command(name="anuleaza-giveaway", description="Anulează un giveaway activ")
