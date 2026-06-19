@@ -64,6 +64,7 @@ ORA_END_CHECK   = 23
 INTERVAL_MINUTE = 5
 
 INVITE_DATA_FILE = "invite_data.json"
+GIVEAWAY_DATA_FILE = "giveaway_data.json"
 
 # ──────────────────────────────────────────────
 # TEXTE
@@ -203,6 +204,42 @@ def remove_invite(invited_id: int):
 def get_inviter(user_id: int):
     data = load_invite_data()
     return data.get(str(user_id), {}).get("invited_by")
+
+
+# ──────────────────────────────────────────────
+# GIVEAWAY DATA PERSISTENT
+# ──────────────────────────────────────────────
+
+def save_giveaway_data():
+    """Salvează giveaway_data în JSON, convertind set/datetime în formate serializabile."""
+    try:
+        serializable = {}
+        for msg_id, data in giveaway_data.items():
+            d = dict(data)
+            d["participanti"] = list(d["participanti"])
+            d["end_time"] = d["end_time"].isoformat()
+            serializable[str(msg_id)] = d
+        with open(GIVEAWAY_DATA_FILE, "w") as f:
+            json.dump(serializable, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  Eroare la salvarea giveaway_data: {e}")
+
+def load_giveaway_data() -> dict:
+    """Încarcă giveaway_data din JSON, reconvertind tipurile."""
+    try:
+        with open(GIVEAWAY_DATA_FILE, "r") as f:
+            raw = json.load(f)
+        result = {}
+        for msg_id_str, d in raw.items():
+            d["participanti"] = set(d["participanti"])
+            d["end_time"] = datetime.fromisoformat(d["end_time"])
+            # invite_codes și invitati_de au chei int salvate ca string în JSON
+            d["invite_codes"] = {int(k): v for k, v in d.get("invite_codes", {}).items()}
+            d["invitati_de"] = {int(k): v for k, v in d.get("invitati_de", {}).items()}
+            result[int(msg_id_str)] = d
+        return result
+    except Exception:
+        return {}
 
 
 # ──────────────────────────────────────────────
@@ -377,6 +414,7 @@ async def verifica_membrii_giveaway():
                 data["pornit"] = True
                 data["end_time"] = datetime.utcnow() + timedelta(seconds=data["secunde_durata"])
                 asyncio.create_task(countdown_giveaway(msg_id, data["secunde_durata"]))
+                save_giveaway_data()
                 print(f"✅ Giveaway {msg_id} pornit")
             try:
                 msg = await canal.fetch_message(msg_id)
@@ -830,6 +868,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
         msg = await canal.send("@everyone", embed=embed_giveaway(data, guild), view=view)
         data["msg_id"] = msg.id
         giveaway_data[msg.id] = data
+        save_giveaway_data()
 
         try:
             await interaction.message.delete()
@@ -908,6 +947,7 @@ class ConfirmView(discord.ui.View):
                 except discord.Forbidden:
                     pass
 
+        save_giveaway_data()
         await interaction.response.send_message(
             f"🎉 Ești înscris! Mult succes!\n📊 Participanți: **{total}**",
             ephemeral=True
@@ -943,6 +983,7 @@ async def finalizeaza_giveaway(msg_id: int):
     if not participanti:
         await canal.send("🎉 Giveaway-ul s-a încheiat dar nu a existat niciun participant.")
         del giveaway_data[msg_id]
+        save_giveaway_data()
         return
 
     tickete = list(participanti)
@@ -970,6 +1011,7 @@ async def finalizeaza_giveaway(msg_id: int):
     embed.set_footer(text="Hydra Prestige • Metin2 Community")
     await canal.send("@everyone", embed=embed)
     del giveaway_data[msg_id]
+    save_giveaway_data()
 
 
 # ──────────────────────────────────────────────
@@ -1436,6 +1478,7 @@ async def anuleaza_giveaway(interaction: discord.Interaction, message_id: str):
     embed.set_footer(text="Hydra Prestige • Metin2 Community")
     await canal.send(embed=embed)
     del giveaway_data[msg_id]
+    save_giveaway_data()
     await interaction.response.send_message("✅ Giveaway anulat cu succes.", ephemeral=True)
 
 
@@ -1491,6 +1534,23 @@ async def on_ready():
 
     update_member_counter.start()
     print("✅ Counter membri pornit")
+
+    # Reîncărcăm giveaway-urile active și reluăm countdown-urile
+    giveaway_data.update(load_giveaway_data())
+    if giveaway_data:
+        are_pending_membri = False
+        for msg_id, data in giveaway_data.items():
+            if data.get("pornit", True):
+                ramase = (data["end_time"] - datetime.utcnow()).total_seconds()
+                if ramase > 0:
+                    asyncio.create_task(countdown_giveaway(msg_id, ramase))
+                else:
+                    asyncio.create_task(finalizeaza_giveaway(msg_id))
+            else:
+                are_pending_membri = True
+        if are_pending_membri and not verifica_membrii_giveaway.is_running():
+            verifica_membrii_giveaway.start()
+        print(f"✅ {len(giveaway_data)} giveaway(uri) active reluate din JSON")
 
     if YOUTUBE_API_KEY:
         youtube_channel_id_resolved = await get_youtube_channel_id(YOUTUBE_HANDLE)
