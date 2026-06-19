@@ -365,6 +365,7 @@ def embed_giveaway(data: dict, guild: discord.Guild) -> discord.Embed:
     conditii_text = data.get("conditii", "").strip() or "Nicio condiție — participare liberă!"
     membri_minim = data.get("membri_minim")
     membri_actuali = guild.member_count if guild else 0
+    numar_castigatori = data.get("numar_castigatori", 1)
 
     if membri_minim and not data.get("pornit"):
         status = f"⏳ Așteptăm **{membri_actuali}/{membri_minim}** membri pentru a porni countdown-ul"
@@ -372,8 +373,11 @@ def embed_giveaway(data: dict, guild: discord.Guild) -> discord.Embed:
         timestamp = int(data["end_time"].timestamp())
         status = f"**⏰ Extragere:** <t:{timestamp}:F>\n**⏳ Timp rămas:** <t:{timestamp}:R>"
 
+    castigatori_text = f"**🏆 Câștigători:** {numar_castigatori}\n" if numar_castigatori > 1 else ""
+
     desc = (
-        f"**Premiu:** {data['premiu']}\n\n"
+        f"**Premiu:** {data['premiu']}\n"
+        f"{castigatori_text}\n"
         f"**📋 Condiții și detalii:**\n{conditii_text}\n\n"
         f"Apasă butonul **Participă** după ce ai completat taskurile.\n\n"
         f"{status}"
@@ -835,9 +839,10 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
         style=discord.TextStyle.paragraph
     )
 
-    def __init__(self, mentioneaza_everyone: bool = True):
+    def __init__(self, mentioneaza_everyone: bool = True, numar_castigatori: int = 1):
         super().__init__()
         self.mentioneaza_everyone = mentioneaza_everyone
+        self.numar_castigatori = numar_castigatori
 
     async def on_submit(self, interaction: discord.Interaction):
         secunde_durata = parse_durata(self.durata.value)
@@ -884,6 +889,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
             "membri_minim": membri_min,
             "pornit": pornit,
             "mentioneaza_everyone": self.mentioneaza_everyone,
+            "numar_castigatori": self.numar_castigatori,
         }
 
         view = GiveawayView()
@@ -1016,15 +1022,34 @@ async def finalizeaza_giveaway(msg_id: int):
             bonus = sum(1 for code, inviter in data.get("invitati_de", {}).items() if inviter == user_id)
             tickete.extend([user_id] * bonus)
 
-    castigator_id = random.choice(tickete)
-    castigator = canal.guild.get_member(castigator_id)
-    nume_castigator = castigator.mention if castigator else f"<@{castigator_id}>"
+    numar_castigatori = min(data.get("numar_castigatori", 1), len(participanti))
+    castigatori_ids = []
+    tickete_ramase = list(tickete)
+    for _ in range(numar_castigatori):
+        castigator_id = random.choice(tickete_ramase)
+        castigatori_ids.append(castigator_id)
+        # Scoatem toate ticketele câștigătorului ca să nu fie ales din nou
+        tickete_ramase = [t for t in tickete_ramase if t != castigator_id]
+        if not tickete_ramase:
+            break
+
+    linii_castigatori = []
+    for cid in castigatori_ids:
+        castigator = canal.guild.get_member(cid)
+        nume = castigator.mention if castigator else f"<@{cid}>"
+        linii_castigatori.append(nume)
+
+    if len(linii_castigatori) == 1:
+        castigatori_text = f"🎉 **Câștigătorul este:** {linii_castigatori[0]}"
+    else:
+        lista_text = "\n".join(f"🎉 {n}" for n in linii_castigatori)
+        castigatori_text = f"🎉 **Câștigătorii sunt:**\n{lista_text}"
 
     embed = discord.Embed(
         title="🏆 Giveaway încheiat!",
         description=(
             f"**Premiu:** {data['premiu']}\n\n"
-            f"🎉 **Câștigătorul este:** {nume_castigator}\n\n"
+            f"{castigatori_text}\n\n"
             f"📊 Total participanți: **{len(participanti)}**\n"
             f"🎟️ Total tickete: **{len(tickete)}**\n\n"
             f"Mulțumim tuturor pentru participare și vă mai așteptăm!"
@@ -1443,12 +1468,18 @@ async def help_cmd(interaction: discord.Interaction):
 
 
 @tree.command(name="giveaway", description="Creează un giveaway")
-@app_commands.describe(mentioneaza_everyone="Trimite @everyone la postare? (implicit: da)")
-async def giveaway_cmd(interaction: discord.Interaction, mentioneaza_everyone: bool = True):
+@app_commands.describe(
+    mentioneaza_everyone="Trimite @everyone la postare? (implicit: da)",
+    numar_castigatori="Câți câștigători să extragă? (implicit: 1)"
+)
+async def giveaway_cmd(interaction: discord.Interaction, mentioneaza_everyone: bool = True, numar_castigatori: int = 1):
     if not are_rol_staff(interaction.user):
         await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
         return
-    await interaction.response.send_modal(GiveawayModal(mentioneaza_everyone))
+    if numar_castigatori < 1 or numar_castigatori > 20:
+        await interaction.response.send_message("❌ Numărul de câștigători trebuie să fie între 1 și 20.", ephemeral=True)
+        return
+    await interaction.response.send_modal(GiveawayModal(mentioneaza_everyone, numar_castigatori))
 
 
 @tree.command(name="extrage-giveaway", description="Extrage câștigătorul unui giveaway înainte de termen")
