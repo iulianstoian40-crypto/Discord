@@ -1943,7 +1943,7 @@ async def on_ready():
         embed_gaming = discord.Embed(
             title="🎮 Verificare Gaming",
             description=(
-                "Joci **alte jocuri**? Apasă butonul de mai jos pentru a obține "
+                "Joci **alte jocuri**? Apasă butonul de mai jos pentru a obține"
                 "accesul la canalele de gaming.\n\n"
                 "**Vei primi:** `🎮 Gamer` + rolul jocului tău"
             ),
