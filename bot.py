@@ -1973,3 +1973,4 @@ async def on_ready():
 
 bot.run(TOKEN)
 # test persistence check
+#testez baza de date pentru invitatii
