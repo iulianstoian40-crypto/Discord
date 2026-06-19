@@ -6,10 +6,12 @@ import asyncio
 import random
 import aiohttp
 import json
+import asyncpg
 from datetime import datetime, timedelta
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # ──────────────────────────────────────────────
 # CONFIGURARE
@@ -149,38 +151,71 @@ tree = bot.tree
 giveaway_data = {}
 giveaway_history = {}
 # istoric giveaway-uri finalizate recent — permite reroll. { msg_id: {premiu, participanti, canal_id} }
-GIVEAWAY_HISTORY_FILE = "giveaway_history.json"
 
 invite_tracker = {}
 cached_invites = {}
 youtube_channel_id_resolved = None
 live_anuntat = False
 
+db_pool = None  # pool de conexiuni PostgreSQL, inițializat în on_ready
+
+
+# ──────────────────────────────────────────────
+# DATABASE — PostgreSQL key-value store
+# ──────────────────────────────────────────────
+# Folosim o tabelă simplă (key TEXT, value JSONB) ca să păstrăm aceeași
+# interfață ca fișierele JSON, dar cu persistență reală pe Railway.
+
+async def init_db():
+    global db_pool
+    if not DATABASE_URL:
+        print("⚠️  DATABASE_URL lipsă — persistența nu va funcționa!")
+        return
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY,
+                value JSONB NOT NULL
+            )
+        """)
+    print("✅ Conectat la PostgreSQL și tabelă kv_store pregătită")
+
+async def db_get(key: str) -> dict:
+    if not db_pool:
+        return {}
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM kv_store WHERE key = $1", key)
+        if row:
+            return json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+        return {}
+
+async def db_set(key: str, value: dict):
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO kv_store (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = $2
+        """, key, json.dumps(value))
+
 
 # ──────────────────────────────────────────────
 # INVITE DATA PERSISTENT
 # ──────────────────────────────────────────────
 
-def load_invite_data() -> dict:
-    try:
-        with open(INVITE_DATA_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+async def load_invite_data() -> dict:
+    return await db_get("invite_data")
 
-def save_invite_data(data: dict):
-    try:
-        with open(INVITE_DATA_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"⚠️  Eroare la salvarea invite_data: {e}")
+async def save_invite_data(data: dict):
+    await db_set("invite_data", data)
 
-def get_invite_count(user_id: int) -> int:
-    data = load_invite_data()
+async def get_invite_count(user_id: int) -> int:
+    data = await load_invite_data()
     return data.get(str(user_id), {}).get("invites", 0)
 
-def add_invite(inviter_id: int, invited_id: int):
-    data = load_invite_data()
+async def add_invite(inviter_id: int, invited_id: int):
+    data = await load_invite_data()
     key = str(inviter_id)
     if key not in data:
         data[key] = {"invites": 0, "invited_by": None, "invited_users": []}
@@ -191,10 +226,10 @@ def add_invite(inviter_id: int, invited_id: int):
     if inv_key not in data:
         data[inv_key] = {"invites": 0, "invited_by": None, "invited_users": []}
     data[inv_key]["invited_by"] = inviter_id
-    save_invite_data(data)
+    await save_invite_data(data)
 
-def remove_invite(invited_id: int):
-    data = load_invite_data()
+async def remove_invite(invited_id: int):
+    data = await load_invite_data()
     inv_key = str(invited_id)
     inviter_id = data.get(inv_key, {}).get("invited_by")
     if inviter_id:
@@ -203,25 +238,25 @@ def remove_invite(invited_id: int):
             data[key]["invites"] -= 1
             if invited_id in data[key]["invited_users"]:
                 data[key]["invited_users"].remove(invited_id)
-        save_invite_data(data)
+        await save_invite_data(data)
     return inviter_id
 
-def get_inviter(user_id: int):
-    data = load_invite_data()
+async def get_inviter(user_id: int):
+    data = await load_invite_data()
     return data.get(str(user_id), {}).get("invited_by")
 
-def set_invite_count(user_id: int, count: int):
+async def set_invite_count(user_id: int, count: int):
     """Setează manual numărul de invitații al unui user (admin override)."""
-    data = load_invite_data()
+    data = await load_invite_data()
     key = str(user_id)
     if key not in data:
         data[key] = {"invites": 0, "invited_by": None, "invited_users": []}
     data[key]["invites"] = count
-    save_invite_data(data)
+    await save_invite_data(data)
 
-def get_leaderboard_invitatii() -> list:
+async def get_leaderboard_invitatii() -> list:
     """Returnează lista (user_id, invites) sortată descrescător."""
-    data = load_invite_data()
+    data = await load_invite_data()
     lista = [(int(uid), info.get("invites", 0)) for uid, info in data.items()]
     lista = [item for item in lista if item[1] > 0]
     lista.sort(key=lambda x: x[1], reverse=True)
@@ -232,65 +267,48 @@ def get_leaderboard_invitatii() -> list:
 # GIVEAWAY DATA PERSISTENT
 # ──────────────────────────────────────────────
 
-def save_giveaway_data():
-    """Salvează giveaway_data în JSON, convertind set/datetime în formate serializabile."""
-    try:
-        serializable = {}
-        for msg_id, data in giveaway_data.items():
-            d = dict(data)
-            d["participanti"] = list(d["participanti"])
-            d["end_time"] = d["end_time"].isoformat()
-            serializable[str(msg_id)] = d
-        with open(GIVEAWAY_DATA_FILE, "w") as f:
-            json.dump(serializable, f, indent=2)
-    except Exception as e:
-        print(f"⚠️  Eroare la salvarea giveaway_data: {e}")
+async def save_giveaway_data():
+    """Salvează giveaway_data în PostgreSQL, convertind set/datetime în formate serializabile."""
+    serializable = {}
+    for msg_id, data in giveaway_data.items():
+        d = dict(data)
+        d["participanti"] = list(d["participanti"])
+        d["end_time"] = d["end_time"].isoformat()
+        serializable[str(msg_id)] = d
+    await db_set("giveaway_data", serializable)
 
-def load_giveaway_data() -> dict:
-    """Încarcă giveaway_data din JSON, reconvertind tipurile."""
-    try:
-        with open(GIVEAWAY_DATA_FILE, "r") as f:
-            raw = json.load(f)
-        result = {}
-        for msg_id_str, d in raw.items():
-            d["participanti"] = set(d["participanti"])
-            d["end_time"] = datetime.fromisoformat(d["end_time"])
-            # invite_codes și invitati_de au chei int salvate ca string în JSON
-            d["invite_codes"] = {int(k): v for k, v in d.get("invite_codes", {}).items()}
-            d["invitati_de"] = {int(k): v for k, v in d.get("invitati_de", {}).items()}
-            result[int(msg_id_str)] = d
-        return result
-    except Exception:
-        return {}
+async def load_giveaway_data() -> dict:
+    """Încarcă giveaway_data din PostgreSQL, reconvertind tipurile."""
+    raw = await db_get("giveaway_data")
+    result = {}
+    for msg_id_str, d in raw.items():
+        d["participanti"] = set(d["participanti"])
+        d["end_time"] = datetime.fromisoformat(d["end_time"])
+        d["invite_codes"] = {int(k): v for k, v in d.get("invite_codes", {}).items()}
+        d["invitati_de"] = {int(k): v for k, v in d.get("invitati_de", {}).items()}
+        result[int(msg_id_str)] = d
+    return result
 
-def save_giveaway_history():
-    try:
-        serializable = {}
-        for msg_id, h in giveaway_history.items():
-            serializable[str(msg_id)] = {
-                "premiu": h["premiu"],
-                "participanti": list(h["participanti"]),
-                "canal_id": h["canal_id"],
-            }
-        with open(GIVEAWAY_HISTORY_FILE, "w") as f:
-            json.dump(serializable, f, indent=2)
-    except Exception as e:
-        print(f"⚠️  Eroare la salvarea giveaway_history: {e}")
-
-def load_giveaway_history() -> dict:
-    try:
-        with open(GIVEAWAY_HISTORY_FILE, "r") as f:
-            raw = json.load(f)
-        return {
-            int(msg_id_str): {
-                "premiu": h["premiu"],
-                "participanti": set(h["participanti"]),
-                "canal_id": h["canal_id"],
-            }
-            for msg_id_str, h in raw.items()
+async def save_giveaway_history():
+    serializable = {}
+    for msg_id, h in giveaway_history.items():
+        serializable[str(msg_id)] = {
+            "premiu": h["premiu"],
+            "participanti": list(h["participanti"]),
+            "canal_id": h["canal_id"],
         }
-    except Exception:
-        return {}
+    await db_set("giveaway_history", serializable)
+
+async def load_giveaway_history() -> dict:
+    raw = await db_get("giveaway_history")
+    return {
+        int(msg_id_str): {
+            "premiu": h["premiu"],
+            "participanti": set(h["participanti"]),
+            "canal_id": h["canal_id"],
+        }
+        for msg_id_str, h in raw.items()
+    }
 
 
 # ──────────────────────────────────────────────
@@ -469,7 +487,7 @@ async def verifica_membrii_giveaway():
                 data["pornit"] = True
                 data["end_time"] = datetime.utcnow() + timedelta(seconds=data["secunde_durata"])
                 asyncio.create_task(countdown_giveaway(msg_id, data["secunde_durata"]))
-                save_giveaway_data()
+                await save_giveaway_data()
                 print(f"✅ Giveaway {msg_id} pornit")
             try:
                 msg = await canal.fetch_message(msg_id)
@@ -931,7 +949,7 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
         msg = await canal.send(mesaj_mention, embed=embed_giveaway(data, guild), view=view)
         data["msg_id"] = msg.id
         giveaway_data[msg.id] = data
-        save_giveaway_data()
+        await save_giveaway_data()
 
         try:
             await interaction.message.delete()
@@ -1006,7 +1024,7 @@ async def inscrie_participant_giveaway(msg_id: int, user: discord.User, guild: d
             except discord.Forbidden:
                 pass
 
-    save_giveaway_data()
+    await save_giveaway_data()
 
     # Notificare în canalul de log
     canal_log = bot.get_channel(CANAL_LOG_GIVEAWAY_ID)
@@ -1075,12 +1093,12 @@ async def finalizeaza_giveaway(msg_id: int):
     if not participanti:
         await canal.send("🎉 Giveaway-ul s-a încheiat dar nu a existat niciun participant.")
         del giveaway_data[msg_id]
-        save_giveaway_data()
+        await save_giveaway_data()
         return
 
     tickete = list(participanti)
     for user_id in participanti:
-        bonus = get_invite_count(user_id)
+        bonus = await get_invite_count(user_id)
         tickete.extend([user_id] * bonus)
 
     numar_castigatori = min(data.get("numar_castigatori", 1), len(participanti))
@@ -1127,10 +1145,10 @@ async def finalizeaza_giveaway(msg_id: int):
         "participanti": set(participanti),
         "canal_id": data["canal_id"],
     }
-    save_giveaway_history()
+    await save_giveaway_history()
 
     del giveaway_data[msg_id]
-    save_giveaway_data()
+    await save_giveaway_data()
 
 
 # ──────────────────────────────────────────────
@@ -1308,8 +1326,8 @@ async def on_member_join(member: discord.Member):
             if invite.uses > uses_before:
                 if invite.inviter:
                     inviter = invite.inviter
-                    add_invite(inviter.id, member.id)
-                    inviter_count = get_invite_count(inviter.id)
+                    await add_invite(inviter.id, member.id)
+                    inviter_count = await get_invite_count(inviter.id)
                     if invite.code in invite_tracker:
                         for msg_id, data in giveaway_data.items():
                             if invite.code in data.get("invite_codes", {}).values():
@@ -1346,12 +1364,12 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    inviter_id = remove_invite(member.id)
+    inviter_id = await remove_invite(member.id)
 
     canal = bot.get_channel(CANAL_WELCOME_ID)
     if canal:
         if inviter_id:
-            inviter_count = get_invite_count(inviter_id)
+            inviter_count = await get_invite_count(inviter_id)
             desc = f"**{member.name}** a părăsit serverul.\n📉 Invitația lui **<@{inviter_id}>** a fost scăzută (total: **{inviter_count}**)"
         else:
             desc = f"**{member.name}** a părăsit serverul."
@@ -1652,7 +1670,8 @@ async def reroll_giveaway(interaction: discord.Interaction, message_id: str, exc
 
     tickete = list(participanti)
     for uid in participanti:
-        tickete.extend([uid] * get_invite_count(uid))
+        bonus = await get_invite_count(uid)
+        tickete.extend([uid] * bonus)
 
     castigator_id = random.choice(tickete)
     castigator = interaction.guild.get_member(castigator_id)
@@ -1691,7 +1710,7 @@ async def participanti_giveaway(interaction: discord.Interaction, message_id: st
     participanti = list(data["participanti"])
     total_tickete = len(participanti)
     for uid in participanti:
-        total_tickete += get_invite_count(uid)
+        total_tickete += await get_invite_count(uid)
 
     embed = discord.Embed(
         title="📊 Participanți giveaway",
@@ -1767,7 +1786,7 @@ async def anuleaza_giveaway(interaction: discord.Interaction, message_id: str):
     embed.set_footer(text="Hydra Prestige • Metin2 Community")
     await canal.send(embed=embed)
     del giveaway_data[msg_id]
-    save_giveaway_data()
+    await save_giveaway_data()
     await interaction.response.send_message("✅ Giveaway anulat cu succes.", ephemeral=True)
 
 
@@ -1775,8 +1794,8 @@ async def anuleaza_giveaway(interaction: discord.Interaction, message_id: str):
 @app_commands.describe(membru="Membrul de verificat (lasă gol pentru tine)")
 async def invitatii_cmd(interaction: discord.Interaction, membru: discord.Member = None):
     target = membru or interaction.user
-    count = get_invite_count(target.id)
-    inviter_id = get_inviter(target.id)
+    count = await get_invite_count(target.id)
+    inviter_id = await get_inviter(target.id)
     inviter_text = f"\n📨 Invitat de: <@{inviter_id}>" if inviter_id else ""
     embed = discord.Embed(
         title="📊 Statistici invitații",
@@ -1788,7 +1807,7 @@ async def invitatii_cmd(interaction: discord.Interaction, membru: discord.Member
 
 @tree.command(name="leaderboard-invitatii", description="Vezi clasamentul membrilor după numărul de invitații")
 async def leaderboard_invitatii_cmd(interaction: discord.Interaction):
-    lista = get_leaderboard_invitatii()
+    lista = await get_leaderboard_invitatii()
     if not lista:
         await interaction.response.send_message("📊 Nimeni nu a adus încă invitații.", ephemeral=True)
         return
@@ -1818,7 +1837,7 @@ async def seteaza_invitatii_cmd(interaction: discord.Interaction, membru: discor
         await interaction.response.send_message("❌ Numărul nu poate fi negativ.", ephemeral=True)
         return
 
-    set_invite_count(membru.id, numar)
+    await set_invite_count(membru.id, numar)
     embed = discord.Embed(
         title="✅ Invitații actualizate",
         description=f"**{membru.display_name}** are acum **{numar}** invitații.",
@@ -1836,6 +1855,8 @@ async def seteaza_invitatii_cmd(interaction: discord.Interaction, membru: discor
 async def on_ready():
     global youtube_channel_id_resolved
     print(f"✅ Bot pornit ca {bot.user}")
+
+    await init_db()
 
     try:
         guild = bot.guilds[0]
@@ -1867,8 +1888,8 @@ async def on_ready():
     print("✅ Counter membri pornit")
 
     # Reîncărcăm giveaway-urile active și reluăm countdown-urile
-    giveaway_data.update(load_giveaway_data())
-    giveaway_history.update(load_giveaway_history())
+    giveaway_data.update(await load_giveaway_data())
+    giveaway_history.update(await load_giveaway_history())
     if giveaway_data:
         are_pending_membri = False
         for msg_id, data in giveaway_data.items():
