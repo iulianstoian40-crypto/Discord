@@ -835,6 +835,10 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
         style=discord.TextStyle.paragraph
     )
 
+    def __init__(self, mentioneaza_everyone: bool = True):
+        super().__init__()
+        self.mentioneaza_everyone = mentioneaza_everyone
+
     async def on_submit(self, interaction: discord.Interaction):
         secunde_durata = parse_durata(self.durata.value)
         if not secunde_durata:
@@ -879,10 +883,12 @@ class GiveawayModal(discord.ui.Modal, title="Creează Giveaway"):
             "canal_id": CANAL_GIVEAWAY_ID,
             "membri_minim": membri_min,
             "pornit": pornit,
+            "mentioneaza_everyone": self.mentioneaza_everyone,
         }
 
         view = GiveawayView()
-        msg = await canal.send("@everyone", embed=embed_giveaway(data, guild), view=view)
+        mesaj_mention = "@everyone" if self.mentioneaza_everyone else None
+        msg = await canal.send(mesaj_mention, embed=embed_giveaway(data, guild), view=view)
         data["msg_id"] = msg.id
         giveaway_data[msg.id] = data
         save_giveaway_data()
@@ -1026,7 +1032,8 @@ async def finalizeaza_giveaway(msg_id: int):
         color=0x57F287
     )
     embed.set_footer(text="Hydra Prestige • Metin2 Community")
-    await canal.send("@everyone", embed=embed)
+    mesaj_mention = "@everyone" if data.get("mentioneaza_everyone", True) else None
+    await canal.send(mesaj_mention, embed=embed)
     del giveaway_data[msg_id]
     save_giveaway_data()
 
@@ -1436,11 +1443,12 @@ async def help_cmd(interaction: discord.Interaction):
 
 
 @tree.command(name="giveaway", description="Creează un giveaway")
-async def giveaway_cmd(interaction: discord.Interaction):
+@app_commands.describe(mentioneaza_everyone="Trimite @everyone la postare? (implicit: da)")
+async def giveaway_cmd(interaction: discord.Interaction, mentioneaza_everyone: bool = True):
     if not are_rol_staff(interaction.user):
         await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
         return
-    await interaction.response.send_modal(GiveawayModal())
+    await interaction.response.send_modal(GiveawayModal(mentioneaza_everyone))
 
 
 @tree.command(name="extrage-giveaway", description="Extrage câștigătorul unui giveaway înainte de termen")
