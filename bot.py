@@ -1911,7 +1911,7 @@ async def on_ready():
             description=(
                 "Ești jucător de **Metin2**? Apasă butonul de mai jos pentru a obține "
                 "accesul la canalele de Metin2.\n\n"
-                "**Vei primi:** `⚔️ Metin2` + rolul serverului tău"
+                "**Vei primi:** `⚔️ Metin2` + rolul serverului tău "
             ),
             color=0xE8B84B
         )
