@@ -23,6 +23,7 @@ CANAL_TEPARI_ID      = 1516063981469437982
 CANAL_GIVEAWAY_ID    = 1513873592423682109
 CANAL_YOUTUBE_ID     = 1513873645485817938
 CANAL_MEMBRI_ID      = 1516433983817257190
+CANAL_LOG_GIVEAWAY_ID = 1517580517799886991
 
 CANALE_MARKET = [
     1516062696293007410,
@@ -146,6 +147,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 giveaway_data = {}
+giveaway_history = {}
+# istoric giveaway-uri finalizate recent — permite reroll. { msg_id: {premiu, participanti, canal_id} }
+GIVEAWAY_HISTORY_FILE = "giveaway_history.json"
+
 invite_tracker = {}
 cached_invites = {}
 youtube_channel_id_resolved = None
@@ -255,6 +260,35 @@ def load_giveaway_data() -> dict:
             d["invitati_de"] = {int(k): v for k, v in d.get("invitati_de", {}).items()}
             result[int(msg_id_str)] = d
         return result
+    except Exception:
+        return {}
+
+def save_giveaway_history():
+    try:
+        serializable = {}
+        for msg_id, h in giveaway_history.items():
+            serializable[str(msg_id)] = {
+                "premiu": h["premiu"],
+                "participanti": list(h["participanti"]),
+                "canal_id": h["canal_id"],
+            }
+        with open(GIVEAWAY_HISTORY_FILE, "w") as f:
+            json.dump(serializable, f, indent=2)
+    except Exception as e:
+        print(f"⚠️  Eroare la salvarea giveaway_history: {e}")
+
+def load_giveaway_history() -> dict:
+    try:
+        with open(GIVEAWAY_HISTORY_FILE, "r") as f:
+            raw = json.load(f)
+        return {
+            int(msg_id_str): {
+                "premiu": h["premiu"],
+                "participanti": set(h["participanti"]),
+                "canal_id": h["canal_id"],
+            }
+            for msg_id_str, h in raw.items()
+        }
     except Exception:
         return {}
 
@@ -936,6 +970,59 @@ class GiveawayView(discord.ui.View):
         await interaction.response.send_message(mesaj, view=ConfirmView(msg_id), ephemeral=True)
 
 
+async def inscrie_participant_giveaway(msg_id: int, user: discord.User, guild: discord.Guild, adaugat_manual: bool = False):
+    """Înscrie un user la giveaway — folosit de butonul Confirm și de /adauga-participant.
+    Returnează True dacă s-a înscris cu succes, False dacă era deja înscris sau giveaway-ul nu există."""
+    if msg_id not in giveaway_data:
+        return False
+
+    data = giveaway_data[msg_id]
+    if user.id in data["participanti"]:
+        return False
+
+    data["participanti"].add(user.id)
+    total = len(data["participanti"])
+
+    # Generăm invitație unică doar dacă userul nu are deja una pentru acest giveaway
+    if data.get("membri_minim") and user.id not in data["invite_codes"]:
+        invite = await genereaza_invite(guild)
+        if invite:
+            data["invite_codes"][user.id] = invite.code
+            invite_tracker[invite.code] = user.id
+            try:
+                embed_dm = discord.Embed(
+                    title="🎟️ Linkul tău de invitație",
+                    description=(
+                        f"Ești înscris la giveaway! 🎉\n\n"
+                        f"**Invitațiile pe server îți aduc șanse în plus:**\n"
+                        f"1 invitație = 1 ticket bonus la tragerea la sorți\n\n"
+                        f"**Linkul tău unic:**\n{invite.url}\n\n"
+                        f"Cu cât inviți mai mulți prieteni, cu atât ai șanse mai mari!"
+                    ),
+                    color=0xFEE75C
+                )
+                embed_dm.set_footer(text="Hydra Prestige • Metin2 Community")
+                await user.send(embed=embed_dm)
+            except discord.Forbidden:
+                pass
+
+    save_giveaway_data()
+
+    # Notificare în canalul de log
+    canal_log = bot.get_channel(CANAL_LOG_GIVEAWAY_ID)
+    if canal_log:
+        sufix = " *(adăugat manual)*" if adaugat_manual else ""
+        try:
+            await canal_log.send(
+                f"📝 **{user.display_name}** s-a înscris la giveaway-ul **{data['premiu']}**{sufix}\n"
+                f"📊 Total participanți: **{total}**"
+            )
+        except Exception:
+            pass
+
+    return True
+
+
 class ConfirmView(discord.ui.View):
     def __init__(self, msg_id: int):
         super().__init__(timeout=120)
@@ -947,36 +1034,12 @@ class ConfirmView(discord.ui.View):
             await interaction.response.send_message("❌ Giveaway-ul nu mai este activ.", ephemeral=True)
             return
 
-        data = giveaway_data[self.msg_id]
-        user = interaction.user
+        succes = await inscrie_participant_giveaway(self.msg_id, interaction.user, interaction.guild)
+        if not succes:
+            await interaction.response.send_message("✅ Ești deja înscris!", ephemeral=True)
+            return
 
-        data["participanti"].add(user.id)
-        total = len(data["participanti"])
-
-        if data.get("membri_minim"):
-            guild = interaction.guild
-            invite = await genereaza_invite(guild)
-            if invite:
-                data["invite_codes"][user.id] = invite.code
-                invite_tracker[invite.code] = user.id
-                try:
-                    embed_dm = discord.Embed(
-                        title="🎟️ Linkul tău de invitație",
-                        description=(
-                            f"Ești înscris la giveaway! 🎉\n\n"
-                            f"**Invitațiile pe server îți aduc șanse în plus:**\n"
-                            f"1 invitație = 1 ticket bonus la tragerea la sorți\n\n"
-                            f"**Linkul tău unic:**\n{invite.url}\n\n"
-                            f"Cu cât inviți mai mulți prieteni, cu atât ai șanse mai mari!"
-                        ),
-                        color=0xFEE75C
-                    )
-                    embed_dm.set_footer(text="Hydra Prestige • Metin2 Community")
-                    await user.send(embed=embed_dm)
-                except discord.Forbidden:
-                    pass
-
-        save_giveaway_data()
+        total = len(giveaway_data[self.msg_id]["participanti"])
         await interaction.response.send_message(
             f"🎉 Ești înscris! Mult succes!\n📊 Participanți: **{total}**",
             ephemeral=True
@@ -1017,10 +1080,8 @@ async def finalizeaza_giveaway(msg_id: int):
 
     tickete = list(participanti)
     for user_id in participanti:
-        invite_code = data["invite_codes"].get(user_id)
-        if invite_code:
-            bonus = sum(1 for code, inviter in data.get("invitati_de", {}).items() if inviter == user_id)
-            tickete.extend([user_id] * bonus)
+        bonus = get_invite_count(user_id)
+        tickete.extend([user_id] * bonus)
 
     numar_castigatori = min(data.get("numar_castigatori", 1), len(participanti))
     castigatori_ids = []
@@ -1059,6 +1120,15 @@ async def finalizeaza_giveaway(msg_id: int):
     embed.set_footer(text="Hydra Prestige • Metin2 Community")
     mesaj_mention = "@everyone" if data.get("mentioneaza_everyone", True) else None
     await canal.send(mesaj_mention, embed=embed)
+
+    # Salvăm în istoric pentru posibil reroll ulterior
+    giveaway_history[msg_id] = {
+        "premiu": data["premiu"],
+        "participanti": set(participanti),
+        "canal_id": data["canal_id"],
+    }
+    save_giveaway_history()
+
     del giveaway_data[msg_id]
     save_giveaway_data()
 
@@ -1431,7 +1501,9 @@ async def help_cmd(interaction: discord.Interaction):
             "`/giveaway` — creează un giveaway nou\n"
             "`/anuleaza-giveaway [message_id]` — anulează un giveaway activ\n"
             "`/extrage-giveaway [message_id]` — extrage câștigătorul înainte de termen\n"
-            "`/participanti-giveaway [message_id]` — vezi participanții activi"
+            "`/participanti-giveaway [message_id]` — vezi participanții activi\n"
+            "`/reroll-giveaway [message_id]` — extrage alt câștigător dacă cel curent nu îndeplinește condițiile\n"
+            "Right-click pe membru → Apps → **Adaugă la giveaway** — adaugă manual un participant"
         ),
         inline=False
     )
@@ -1483,6 +1555,125 @@ async def giveaway_cmd(interaction: discord.Interaction, mentioneaza_everyone: b
     await interaction.response.send_modal(GiveawayModal(mentioneaza_everyone, numar_castigatori))
 
 
+class AlegeGiveawayDropdown(discord.ui.Select):
+    """Dropdown pentru alegerea giveaway-ului când sunt mai multe active."""
+    def __init__(self, target_user: discord.Member):
+        self.target_user = target_user
+        options = []
+        for msg_id, data in giveaway_data.items():
+            label = data["premiu"][:90]
+            options.append(discord.SelectOption(label=label, value=str(msg_id)))
+        super().__init__(placeholder="Alege giveaway-ul...", options=options[:25])
+
+    async def callback(self, interaction: discord.Interaction):
+        msg_id = int(self.values[0])
+        succes = await inscrie_participant_giveaway(msg_id, self.target_user, interaction.guild, adaugat_manual=True)
+        if succes:
+            await interaction.response.send_message(
+                f"✅ {self.target_user.mention} a fost adăugat la giveaway-ul **{giveaway_data[msg_id]['premiu']}**!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"⚠️ {self.target_user.mention} este deja înscris la acest giveaway.",
+                ephemeral=True
+            )
+
+
+@tree.context_menu(name="Adaugă la giveaway")
+async def adauga_participant_context(interaction: discord.Interaction, member: discord.Member):
+    if not are_rol_staff(interaction.user):
+        await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
+        return
+
+    if not giveaway_data:
+        await interaction.response.send_message("❌ Nu există niciun giveaway activ momentan.", ephemeral=True)
+        return
+
+    if len(giveaway_data) == 1:
+        msg_id = list(giveaway_data.keys())[0]
+        succes = await inscrie_participant_giveaway(msg_id, member, interaction.guild, adaugat_manual=True)
+        if succes:
+            await interaction.response.send_message(
+                f"✅ {member.mention} a fost adăugat la giveaway-ul **{giveaway_data[msg_id]['premiu']}**!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"⚠️ {member.mention} este deja înscris la acest giveaway.",
+                ephemeral=True
+            )
+        return
+
+    view = discord.ui.View(timeout=60)
+    view.add_item(AlegeGiveawayDropdown(member))
+    await interaction.response.send_message(
+        f"Alege giveaway-ul pentru a-l adăuga pe {member.mention}:",
+        view=view, ephemeral=True
+    )
+
+
+@tree.command(name="reroll-giveaway", description="Extrage alt câștigător dacă cel curent nu îndeplinește condițiile")
+@app_commands.describe(message_id="ID-ul mesajului giveaway-ului încheiat", exclude="ID-ul userului de exclus (opțional)")
+async def reroll_giveaway(interaction: discord.Interaction, message_id: str, exclude: str = None):
+    if not are_rol_staff(interaction.user):
+        await interaction.response.send_message("❌ Nu ai permisiunea.", ephemeral=True)
+        return
+
+    try:
+        msg_id = int(message_id.strip())
+    except ValueError:
+        await interaction.response.send_message("❌ ID invalid.", ephemeral=True)
+        return
+
+    # Pentru reroll căutăm în istoricul mesajelor, deoarece giveaway-ul e deja șters din giveaway_data
+    # Folosim un mecanism simplu: cerem staff-ul să dea reroll imediat după extragere, cât mai există backup
+    backup = giveaway_history.get(msg_id)
+    if not backup:
+        await interaction.response.send_message(
+            "❌ Nu mai există date pentru acest giveaway (s-a încheiat și nu mai e în istoric).", ephemeral=True
+        )
+        return
+
+    participanti = list(backup["participanti"])
+    exclude_id = None
+    if exclude:
+        try:
+            exclude_id = int(exclude.strip().replace("<@", "").replace(">", "").replace("!", ""))
+        except ValueError:
+            exclude_id = None
+
+    if exclude_id and exclude_id in participanti:
+        participanti.remove(exclude_id)
+
+    if not participanti:
+        await interaction.response.send_message("❌ Nu mai există participanți eligibili pentru reroll.", ephemeral=True)
+        return
+
+    tickete = list(participanti)
+    for uid in participanti:
+        tickete.extend([uid] * get_invite_count(uid))
+
+    castigator_id = random.choice(tickete)
+    castigator = interaction.guild.get_member(castigator_id)
+    nume = castigator.mention if castigator else f"<@{castigator_id}>"
+
+    canal = bot.get_channel(backup["canal_id"])
+    embed = discord.Embed(
+        title="🔄 Reroll Giveaway!",
+        description=(
+            f"**Premiu:** {backup['premiu']}\n\n"
+            f"🎉 **Noul câștigător este:** {nume}\n\n"
+            f"Mulțumim pentru înțelegere!"
+        ),
+        color=0x57F287
+    )
+    embed.set_footer(text="Hydra Prestige • Metin2 Community")
+    if canal:
+        await canal.send(embed=embed)
+    await interaction.response.send_message("✅ Reroll efectuat cu succes!", ephemeral=True)
+
+
 @tree.command(name="participanti-giveaway", description="Vezi câți participanți sunt la un giveaway activ")
 @app_commands.describe(message_id="ID-ul mesajului giveaway-ului")
 async def participanti_giveaway(interaction: discord.Interaction, message_id: str):
@@ -1500,10 +1691,7 @@ async def participanti_giveaway(interaction: discord.Interaction, message_id: st
     participanti = list(data["participanti"])
     total_tickete = len(participanti)
     for uid in participanti:
-        invite_code = data["invite_codes"].get(uid)
-        if invite_code:
-            bonus = sum(1 for code, inviter in data.get("invitati_de", {}).items() if inviter == uid)
-            total_tickete += bonus
+        total_tickete += get_invite_count(uid)
 
     embed = discord.Embed(
         title="📊 Participanți giveaway",
@@ -1680,6 +1868,7 @@ async def on_ready():
 
     # Reîncărcăm giveaway-urile active și reluăm countdown-urile
     giveaway_data.update(load_giveaway_data())
+    giveaway_history.update(load_giveaway_history())
     if giveaway_data:
         are_pending_membri = False
         for msg_id, data in giveaway_data.items():
@@ -1762,3 +1951,4 @@ async def on_ready():
 
 
 bot.run(TOKEN)
+# test persistence check
